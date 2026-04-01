@@ -52,7 +52,15 @@ const sidebars: SidebarsConfig = {
         { type: 'doc', id: 'state-and-persistence', label: '第 13 章 · 状态管理与数据持久化' },
       ],
     },
-    { type: 'doc', id: 'engineering-practices', label: '第 14 章 · 工程实践与设计模式' },
+    {
+      type: 'category',
+      label: '总结',
+      items: [
+        { type: 'doc', id: 'engineering-practices', label: '第 14 章 · 工程实践与设计模式' },
+        { type: 'doc', id: 'prompt-design-system', label: '第 15 章 · Prompt 工程体系' },
+        { type: 'doc', id: 'message-construction', label: '第 16 章 · 消息数组的构造与生命周期' },
+      ],
+    },
   ],
 };
 

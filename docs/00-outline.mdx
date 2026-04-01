@@ -129,6 +129,18 @@ description: 深入剖析一个大型 TypeScript CLI 智能体系统的架构设
 
 本章是全书的收官之作，从项目中提炼出可复用的工程智慧。你将看到并行预取、懒加载、Agent Swarms、特性标志、插件架构等设计模式的系统性总结，了解 TypeScript 严格模式和类型安全实践如何提升代码质量。本章还会分析项目的测试策略、错误处理模式和韧性机制，并提供面向读者的可操作建议——帮助你将这些经过大规模项目验证的工程实践应用到自己的项目中。
 
+#### 第 15 章 · Prompt 工程体系
+
+> 📄 `15-prompt-design-system.mdx`
+
+本章深入剖析 Claude Code 的系统化 Prompt 设计——这是大型 LLM 智能体系统中控制模型行为的核心工程活动。你将了解 `getSystemPrompt()` 如何将 7 个静态分区和若干动态分区拼装成一个完整的系统提示词数组，`SYSTEM_PROMPT_DYNAMIC_BOUNDARY` 标记如何使跨组织全局 Prompt Cache 成为可能，以及 `systemPromptSection` 与 `DANGEROUS_uncachedSystemPromptSection` 背后的缓存设计哲学。本章还会深度解析每个工具 `prompt.ts` 文件中的行为规范——BashTool 的 Git 安全协议与沙箱边界描述、AgentTool 的"Writing the prompt"元指南，以及 Compact 服务的 `NO_TOOLS_PREAMBLE` 强限制模式。最后，你将看到 `promptCacheBreakDetection.ts` 是如何用两阶段哈希对比实现生产级 Prompt Cache 可观测性的。
+
+#### 第 16 章 · 消息数组的构造与生命周期
+
+> 📄 `16-message-construction.mdx`
+
+本章揭示 Agent 开发者最需要掌握的核心工程问题：**如何构建、管理和优化发送给 LLM 的消息数组**。你将了解 Claude Code 的内部消息系统如何用 7+ 种消息类型（user、assistant、system、attachment、progress 等）维护一个异构数组，并在 API 调用前通过 10 阶段规范化管道转换为严格的 user/assistant 交替格式。本章深入解析三通道上下文注入架构（系统提示词 / 合成用户消息 / 40+ 种附件）、Delta 附件的"无状态扫描 + 增量发射"模式、工具调用循环的显式状态机设计、从 Snip 到 Full Compact 的分层压缩策略，以及 `cache_control` 标记的精确放置规则。最后提炼出 10 条可迁移到任何 Agent 系统的工程模式。
+
 ---
 
 ## 章节依赖关系图
@@ -146,9 +158,15 @@ graph LR
 
     C02 --> C05["第5章<br/>查询引擎"]
     C03 --> C05
+    C05 --> C15["第15章<br/>Prompt工程"]
+    C03 --> C15
+    C15 --> C16["第16章<br/>消息构造"]
+    C05 --> C16
+    C03 --> C16
     C03 --> C08["第8章<br/>UI组件"]
     C03 --> C10["第10章<br/>插件与技能"]
     C03 --> C11["第11章<br/>多智能体"]
+    C11 --> C15
 
     C06 --> C09["第9章<br/>权限与安全"]
     C06 --> C12["第12章<br/>CLI传输"]
@@ -157,6 +175,8 @@ graph LR
 
     style C01 fill:#e1f5fe,stroke:#0288d1,stroke-width:2px
     style C14 fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+    style C15 fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+    style C16 fill:#fff3e0,stroke:#f57c00,stroke-width:2px
     style C05 fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
     style C11 fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
 ```
@@ -186,7 +206,7 @@ graph LR
 
 如果你主要关注架构设计和系统全貌：
 
-> 第 1 章（项目概览）→ 第 2 章（启动流程）→ 第 5 章（查询引擎）→ 第 6 章（桥接通信）→ 第 11 章（多智能体）→ 第 14 章（工程实践）
+> 第 1 章（项目概览）→ 第 2 章（启动流程）→ 第 5 章（查询引擎）→ **第 16 章（消息数组构造）** → 第 6 章（桥接通信）→ 第 11 章（多智能体）→ 第 14 章（工程实践）
 
 这条路径让你快速掌握系统的核心架构决策和关键设计模式。
 
@@ -202,9 +222,9 @@ graph LR
 
 如果你想学习如何构建 LLM 驱动的智能体系统：
 
-> 第 1 章（项目概览）→ 第 3 章（工具系统）→ 第 5 章（查询引擎）→ 第 11 章（多智能体）→ 第 10 章（插件与技能）→ 第 14 章（工程实践）
+> 第 1 章（项目概览）→ 第 3 章（工具系统）→ 第 5 章（查询引擎）→ **第 15 章（Prompt 工程体系）** → **第 16 章（消息数组构造）** → 第 11 章（多智能体）→ 第 10 章（插件与技能）→ 第 14 章（工程实践）
 
-这条路径聚焦于 AI 智能体的核心能力：工具调用、LLM 交互、多智能体协作和可扩展性。
+这条路径聚焦于 AI 智能体的核心能力：工具调用、LLM 交互、Prompt 行为控制、消息构建与上下文管理、多智能体协作和可扩展性。
 
 ### 🔴 路径五：后端 / 基础设施工程师
 
@@ -227,7 +247,7 @@ graph LR
 | **React + Ink** | 终端 UI 渲染框架 | 第 8 章 |
 | **Commander.js** | CLI 参数解析 | 第 2、4 章 |
 | **Zod** | 运行时数据验证 | 第 3、13 章 |
-| **Anthropic SDK** | LLM API 调用 | 第 5 章 |
+| **Anthropic SDK** | LLM API 调用 | 第 5、15 章 |
 | **MCP SDK** | 模型上下文协议集成 | 第 3、10 章 |
 | **JWT** | 会话认证 | 第 6、9 章 |
 | **OAuth 2.0** | 用户认证 | 第 9 章 |

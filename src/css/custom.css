@@ -1,1 +1,43 @@
 /* Custom styles for Claude Code 源码解析 */
+
+/* 深色模式下代码块可读性优化 */
+[data-theme='dark'] .prism-code {
+  background-color: #1e1e2e !important;
+}
+
+[data-theme='dark'] pre {
+  background-color: #1e1e2e !important;
+}
+
+[data-theme='dark'] code {
+  background-color: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+/* 深色模式下行内代码对比度 */
+[data-theme='dark'] :not(pre) > code {
+  color: #e06c75;
+  background-color: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+
+/* 深色模式下代码高亮行 */
+[data-theme='dark'] .theme-code-block-highlighted-line {
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+/* 深色模式下表格可读性 */
+[data-theme='dark'] table {
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+[data-theme='dark'] th {
+  background-color: rgba(255, 255, 255, 0.06);
+}
+
+[data-theme='dark'] td,
+[data-theme='dark'] th {
+  border-color: rgba(255, 255, 255, 0.1);
+}

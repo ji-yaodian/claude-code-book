@@ -38,6 +38,13 @@ const config: Config = {
   themeConfig: {
     navbar: {
       title: 'Claude Code 源码解析',
+      items: [
+        {
+          href: 'https://github.com/ji-yaodian/claude-code-book',
+          label: 'GitHub',
+          position: 'right',
+        },
+      ],
     },
     prism: {
       theme: prismThemes.github,
