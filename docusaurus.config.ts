@@ -16,6 +16,13 @@ const config: Config = {
         content: 'Claude Code, 源码解析, LLM Agent, TypeScript, AI 智能体, Anthropic, 系统架构',
       },
     },
+    {
+      tagName: 'meta',
+      attributes: {
+        name: 'google-site-verification',
+        content: 'Ll7rWSoWC6ZAa2Yry-P5YsVOhxqCjSS0qHUameXNWHk',
+      },
+    },
   ],
 
   i18n: {
