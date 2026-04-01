@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://ji-yaodian.github.io/claude-code-book/sitemap.xml
+Sitemap: https://deepcc.print4.fun/sitemap.xml

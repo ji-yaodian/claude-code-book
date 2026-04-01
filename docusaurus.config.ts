@@ -5,8 +5,8 @@ import { themes as prismThemes } from 'prism-react-renderer';
 const config: Config = {
   title: 'Claude Code 源码解析',
   tagline: '深入理解大型智能体系统的构建方式',
-  url: 'https://ji-yaodian.github.io',
-  baseUrl: '/claude-code-book/',
+  url: 'https://deepcc.print4.fun',
+  baseUrl: '/',
 
   headTags: [
     {
