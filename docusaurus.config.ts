@@ -8,6 +8,16 @@ const config: Config = {
   url: 'https://ji-yaodian.github.io',
   baseUrl: '/claude-code-book/',
 
+  headTags: [
+    {
+      tagName: 'meta',
+      attributes: {
+        name: 'keywords',
+        content: 'Claude Code, 源码解析, LLM Agent, TypeScript, AI 智能体, Anthropic, 系统架构',
+      },
+    },
+  ],
+
   i18n: {
     defaultLocale: 'zh-Hans',
     locales: ['zh-Hans'],

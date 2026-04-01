@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://ji-yaodian.github.io/claude-code-book/sitemap.xml
