@@ -19,6 +19,15 @@ const config: Config = {
 
   themes: ['@docusaurus/theme-mermaid'],
 
+  plugins: [
+    [
+      'docusaurus-lunr-search',
+      {
+        languages: ['en', 'zh'],
+      },
+    ],
+  ],
+
   presets: [
     [
       'classic',
