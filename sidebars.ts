@@ -67,6 +67,7 @@ const sidebars: SidebarsConfig = {
       items: [
         { type: 'doc', id: 'A1-memory-system', label: '番外一 · 记忆系统' },
         { type: 'doc', id: 'A2-design-philosophy', label: '番外二 · 幕后设计哲学' },
+        { type: 'doc', id: 'A3-feature-flags', label: '番外三 · 特性标志与隐藏功能' },
       ],
     },
   ],

@@ -1,0 +1,334 @@
+---
+sidebar_position: 19
+title: 番外三 · 特性标志与隐藏功能
+description: 揭秘 Claude Code 的 88 个编译时特性标志、GrowthBook 运行时配置、CLAUDE.md 指令层级、流式工具执行，以及 KAIROS 自主模式、Buddy 宠物伴侣等未发布功能
+---
+
+# 番外三 · 特性标志与隐藏功能
+
+> 2026 年 3 月的源码泄露后，外界最好奇的不是 Claude Code 已有的功能，而是那些**编译到二进制中却被开关挡住的功能**——88 个编译时特性标志、数百个远程配置开关、一个永不休眠的自主智能体模式、甚至一个电子宠物系统。本章完整拆解这套双层特性标志体系，以及它背后的工程哲学。
+
+## A3.1 双层特性标志体系
+
+Claude Code 使用两层独立的特性标志系统，各有不同的变更速度和风险等级：
+
+### 编译时标志：`feature()` from `bun:bundle`
+
+```typescript
+import { feature } from 'bun:bundle'
+
+if (feature('KAIROS')) {
+  // 这段代码在外部构建中被完全删除
+  const proactiveModule = require('../proactive/index.js')
+}
+```
+
+`feature()` 在 Bun 打包时求值为 `true` 或 `false`。打包器随后进行**常量折叠**和**死代码消除（DCE）**：`false` 分支中的代码——包括 `require` 的模块、字符串字面量、函数定义——从最终产物中彻底消失。
+
+这意味着：
+- 外部构建中**不存在任何未发布功能的代码**（即使反编译也找不到）
+- 内部构建中所有功能代码都在，但通过运行时开关控制是否激活
+- 新功能可以合入主分支而不影响外部发布
+
+源码中共发现 **88 个**编译时特性标志，按功能域分类：
+
+| 功能域 | 标志 | 用途 |
+|--------|------|------|
+| **自主智能体** | `KAIROS`, `PROACTIVE`, `KAIROS_BRIEF`, `KAIROS_DREAM`, `KAIROS_CHANNELS`, `KAIROS_GITHUB_WEBHOOKS`, `KAIROS_PUSH_NOTIFICATION` | 永不休眠的自主模式 |
+| **多智能体** | `COORDINATOR_MODE`, `FORK_SUBAGENT`, `VERIFICATION_AGENT`, `BUILTIN_EXPLORE_PLAN_AGENTS` | 协调者模式与子智能体 |
+| **上下文管理** | `CACHED_MICROCOMPACT`, `CONTEXT_COLLAPSE`, `HISTORY_SNIP`, `REACTIVE_COMPACT`, `COMPACTION_REMINDERS`, `TOKEN_BUDGET`, `CONNECTOR_TEXT` | 压缩与上下文优化 |
+| **规划与推理** | `ULTRAPLAN`, `ULTRATHINK` | 扩展规划与深度推理 |
+| **安全** | `ANTI_DISTILLATION_CC`, `TREE_SITTER_BASH`, `TREE_SITTER_BASH_SHADOW`, `NATIVE_CLIENT_ATTESTATION`, `BASH_CLASSIFIER` | 安全检查与反蒸馏 |
+| **基础设施** | `BRIDGE_MODE`, `CCR_AUTO_CONNECT`, `CCR_MIRROR`, `CCR_REMOTE_SETUP`, `DIRECT_CONNECT`, `SSH_REMOTE`, `DAEMON`, `BG_SESSIONS` | 远程连接与后台会话 |
+| **记忆与技能** | `EXTRACT_MEMORIES`, `TEAMMEM`, `EXPERIMENTAL_SKILL_SEARCH`, `MCP_SKILLS`, `SKILL_IMPROVEMENT` | 记忆提取与技能系统 |
+| **UI/UX** | `BUDDY`, `VOICE_MODE`, `AUTO_THEME`, `HISTORY_PICKER`, `MESSAGE_ACTIONS`, `STREAMLINED_OUTPUT`, `TERMINAL_PANEL` | 界面与交互 |
+| **遥测** | `ENHANCED_TELEMETRY_BETA`, `MEMORY_SHAPE_TELEMETRY`, `SLOW_OPERATION_LOGGING`, `PERFETTO_TRACING`, `PROMPT_CACHE_BREAK_DETECTION` | 监控与分析 |
+| **工具** | `MONITOR_TOOL`, `WEB_BROWSER_TOOL`, `OVERFLOW_TEST_TOOL` | 实验性工具 |
+
+### 运行时标志：GrowthBook
+
+编译时标志控制"功能代码是否存在"，运行时标志控制"存在的功能是否激活"。GrowthBook 是 Claude Code 的运行时特性管理平台：
+
+```typescript title="src/services/analytics/growthbook.ts（简化）"
+export function getFeatureValue_CACHED_MAY_BE_STALE<T>(
+  feature: string,
+  defaultValue: T,
+): T {
+  // 三级查找：环境变量覆盖 → 内存缓存 → 磁盘缓存
+  const envOverride = getEnvOverride(feature)
+  if (envOverride !== undefined) return envOverride
+
+  const cached = remoteEvalFeatureValues.get(feature)
+  if (cached !== undefined) return cached
+
+  return diskCache.get(feature) ?? defaultValue
+}
+```
+
+函数名中的 `CACHED_MAY_BE_STALE` 是有意为之的"丑陋命名"——每次调用时都提醒开发者：这个值可能不是最新的，不要用于安全关键决策。
+
+GrowthBook 的缓存策略：
+- **内存缓存**：从远程 payload 解析后存入 `remoteEvalFeatureValues` Map
+- **磁盘缓存**：写入 `~/.claude.json`，下次启动时即使网络不可用也能读取
+- **刷新周期**：20 分钟 / 6 小时两档
+- **A/B 实验**：通过 `loggedExposures` Set 去重曝光日志
+
+### 双层体系的协作
+
+```
+               ┌─────────────────────────────────┐
+               │         编译时标志               │
+               │  feature('KAIROS') === true?     │
+               │                                  │
+               │  true: 代码存在于构建产物中       │
+               │  false: 代码被 DCE 彻底删除      │
+               └──────────────┬──────────────────┘
+                              │ 代码存在
+                              ↓
+               ┌─────────────────────────────────┐
+               │         运行时标志               │
+               │  GrowthBook: tengu_kairos_v2?    │
+               │                                  │
+               │  true: 功能对该用户激活           │
+               │  false: 功能代码存在但不执行      │
+               └─────────────────────────────────┘
+```
+
+这种双层设计的好处：**编译时标志保证安全（外部用户绝对看不到未发布代码），运行时标志保证灵活（内部可以按用户/百分比渐进发布）**。
+
+---
+
+## A3.2 CLAUDE.md 指令层级
+
+### 四层优先级
+
+CLAUDE.md 不是一个文件，而是一个**层级化的指令系统**。Claude Code 从四个层级收集指令，后加载的覆盖先加载的：
+
+```
+1. Managed memory   → /etc/claude-code/CLAUDE.md    （全局，所有用户）
+2. User memory      → ~/.claude/CLAUDE.md           （私有全局）
+                      ~/.claude/rules/*.md
+3. Project memory   → CLAUDE.md                     （项目根目录）
+                      .claude/CLAUDE.md
+                      .claude/rules/*.md
+4. Local memory     → CLAUDE.local.md               （私有项目级，不提交到 git）
+```
+
+优先级从低到高：**全局 < 用户 < 项目 < 本地**。本地指令（`.local.md`）优先级最高，适合存放不想提交到版本控制的个人偏好。
+
+### 目录遍历发现
+
+项目级 CLAUDE.md 的发现不限于当前目录——系统会**从 cwd 向上遍历到文件系统根目录**，收集路径上所有的 CLAUDE.md 文件。越接近 cwd 的文件优先级越高。
+
+```
+/home/user/projects/my-app/src/     ← cwd
+/home/user/projects/my-app/CLAUDE.md  ← 优先级高
+/home/user/projects/CLAUDE.md         ← 优先级低
+/home/user/CLAUDE.md                  ← 优先级更低
+```
+
+### @include 指令
+
+CLAUDE.md 支持 `@路径` 语法引用其他文件，实现指令的模块化组合：
+
+```markdown
+# 项目规范
+@./docs/coding-standards.md
+@./docs/api-conventions.md
+
+## 额外规则
+本项目使用 tabs 而非 spaces。
+```
+
+- 支持相对路径（`@./`）、home 路径（`@~/`）和绝对路径（`@/`）
+- 循环引用通过跟踪已处理文件集合来防止
+- 不存在的文件被静默忽略（不报错）
+- 被引用文件排在引用文件之前加载
+
+### frontmatter 路径作用域
+
+```yaml
+---
+paths: ["src/api/**", "src/services/**"]
+---
+这些规则仅在你修改 API 或 Service 层代码时生效。
+```
+
+`paths` 字段接受 glob 模式数组。如果省略或为 `["**"]`，规则对所有文件生效。这让你可以为不同目录编写不同的编码规范。
+
+---
+
+## A3.3 StreamingToolExecutor：流式工具执行
+
+### 中流执行：不等响应完成
+
+传统 Agent 循环是串行的：**等 API 响应完成 → 提取 tool_use → 执行工具**。StreamingToolExecutor 打破了这个等待：
+
+```
+传统模式：
+  |--- API 流式响应 ---|--- 执行工具 A ---|--- 执行工具 B ---|
+
+StreamingToolExecutor：
+  |--- API 流式响应 ---|
+       |--- 工具 A（输入完整后立即启动）--|
+              |--- 工具 B --|
+```
+
+当 API 的流式响应中一个 `tool_use` 块的 JSON 输入完整时（碰到分隔边界），`StreamingToolExecutor` 立即将其加入执行队列——**不需要等整个响应完成**。
+
+### 并发安全分类
+
+不是所有工具都能并行执行。每个工具通过 `isConcurrencySafe(input)` 声明自己是否支持并发：
+
+```typescript title="src/services/tools/StreamingToolExecutor.ts（概念）"
+type TrackedTool = {
+  id: string
+  block: ToolUseBlock
+  status: 'queued' | 'executing' | 'completed' | 'yielded'
+  isConcurrencySafe: boolean  // 是否可与其他工具并行
+  results?: Message[]
+}
+```
+
+- **并发安全工具**（Read、Grep、Glob 等只读工具）：可以与其他并发安全工具同时执行
+- **独占工具**（Bash、Edit 等可能修改文件的工具）：需要等待独占访问
+
+### 兄弟中止控制器
+
+```typescript
+// siblingAbortController 是父 abortController 的子控制器
+// Bash 工具报错时 → 取消所有并行的兄弟工具进程
+// 但 NOT 取消父查询循环（用户保留会话）
+```
+
+这种设计让一个工具的失败可以快速终止并行的其他工具（避免浪费），但不会因为一个工具错误而终止整个对话。
+
+---
+
+## A3.4 Coordinator 协调者模式
+
+### 与普通模式的区别
+
+普通模式下，Claude Code 自己执行所有任务。Coordinator 模式下，Claude Code 变成一个**纯调度者**——只做规划、路由和汇总，所有实现工作委派给 worker 子智能体：
+
+```typescript title="src/coordinator/coordinatorMode.ts"
+export function isCoordinatorMode(): boolean {
+  if (feature('COORDINATOR_MODE')) {
+    return isEnvTruthy(process.env.CLAUDE_CODE_COORDINATOR_MODE)
+  }
+  return false
+}
+```
+
+| 维度 | 普通模式 | 协调者模式 |
+|------|---------|-----------|
+| 执行者 | Claude Code 自己 | Worker 子智能体 |
+| 系统提示词 | 默认提示词 | 专用 Coordinator 提示词 |
+| 关注点 | 完成任务 | 分解任务、分配、汇总 |
+| 工具访问 | 全部工具 | 主要是 AgentTool + SendMessage |
+
+### Worker 的任务通知
+
+Worker 完成任务后通过 `<task-notification>` XML 格式返回结果给 Coordinator，包含任务状态、修改的文件和摘要。
+
+### Scratchpad 共享知识
+
+Coordinator 模式可以开启 Scratchpad——一个跨 Worker 持久化的共享文件，用于 Worker 之间传递发现和决策，避免重复工作。
+
+---
+
+## A3.5 KAIROS 与未发布功能巡礼
+
+### KAIROS：永不休眠的智能体
+
+KAIROS 是 Claude Code 最野心勃勃的未发布功能——一个**不等待用户输入、主动观察和行动**的自主智能体模式：
+
+- **Tick 心跳**：系统定期发送 tick 提示保持智能体活跃
+- **终端焦点感知**：检测用户是否正在观看终端
+  - 前台模式：协作式交互，等待用户输入
+  - 后台模式：自主修改代码、运行测试、自动提交
+- **记忆整理（Auto-Dream）**：空闲时自动合并分散的记忆、消除矛盾、转化模糊观察为明确事实
+- **GitHub Webhook 订阅**：监听 PR 事件并主动响应
+
+KAIROS 的系统提示词与普通模式完全不同——不再是"You are an interactive agent"，而是"You are an autonomous agent. Use the available tools to do useful work."
+
+### Buddy：电子宠物伴侣
+
+可能是整个代码库中最出人意料的发现——一个完整的 Tamagotchi 风格宠物系统：
+
+**18 个物种**：duck, goose, blob, cat, dragon, octopus, owl, penguin, turtle, snail, ghost, axolotl, capybara, cactus, robot, rabbit, mushroom, chonk
+
+**5 个稀有度**（权重 60-25-10-4-1）：
+```
+★       Common      (60%)
+★★      Uncommon    (25%)
+★★★     Rare        (10%)
+★★★★    Epic        (4%)
+★★★★★   Legendary   (1%)
+```
+
+**确定性抽卡**：使用 `hash(userId)` + Mulberry32 伪随机数生成器，同一用户永远得到同一只宠物。
+
+**5 项属性**：DEBUGGING, PATIENCE, CHAOS, WISDOM, SNARK——属性值由稀有度决定下限，通过 peak/dump 分布生成。
+
+**灵魂系统**：首次孵化时，Claude 为宠物生成一段性格描述（`CompanionSoul`），存入配置永久保存。
+
+**ASCII 精灵图**：每个物种有 5×12 的 ASCII 艺术图，在终端中显示。
+
+:::tip 彩蛋
+物种名称在源码中使用 `String.fromCharCode()` 编码——因为 Anthropic 的 `excluded-strings.txt` 自动检查会拦截内部代号（capybara 是模型代号之一），所以宠物物种名必须用字符编码绕过这个检查。
+:::
+
+### 其他未发布功能
+
+| 功能 | 特性标志 | 描述 |
+|------|---------|------|
+| **ULTRAPLAN** | `ULTRAPLAN` | 30 分钟远程规划模式 |
+| **ULTRATHINK** | `ULTRATHINK` | 扩展推理/深度思考 |
+| **VOICE_MODE** | `VOICE_MODE` | 语音交互模式 |
+| **WEB_BROWSER_TOOL** | `WEB_BROWSER_TOOL` | 内置浏览器工具 |
+| **WORKFLOW_SCRIPTS** | `WORKFLOW_SCRIPTS` | 工作流脚本自动化 |
+| **MONITOR_TOOL** | `MONITOR_TOOL` | 后台进程事件流监控 |
+| **DAEMON** | `DAEMON` | 后台守护进程模式 |
+| **FORK_SUBAGENT** | `FORK_SUBAGENT` | Fork 式子智能体（继承父上下文） |
+| **CONTEXT_COLLAPSE** | `CONTEXT_COLLAPSE` | 渐进式上下文折叠压缩 |
+
+---
+
+## A3.6 "20% 模型 + 80% 框架" 的工程洞察
+
+外部分析文章中反复出现一个观点：**生产级 Agent 是 20% 的 LLM 调用和 80% 的工程框架**。
+
+从 Claude Code 的代码量分布可以验证这一点：
+
+| 子系统 | 核心文件 | 约行数 | 职责 |
+|--------|---------|--------|------|
+| 消息管理 | messages.ts | ~4,500 | 消息创建、规范化、合并、配对 |
+| 附件注入 | attachments.ts | ~3,900 | 40+ 种上下文注入 |
+| 查询循环 | query.ts | ~1,800 | 状态机、错误恢复、工具执行 |
+| API 层 | claude.ts + api.ts | ~1,900 | 缓存控制、消息转换、Schema 管理 |
+| 压缩 | compact/ 目录 | ~3,000 | 5 种压缩策略 |
+| 权限 | permissions/ 目录 | ~2,500 | 6 种权限模式、规则引擎 |
+| Bash 安全 | bashSecurity.ts | ~1,500 | 23 种攻击向量检查 |
+| **小计：工程框架** | | **~19,100** | |
+| LLM 交互 | prompts.ts + systemPrompt.ts | ~1,200 | 系统提示词组装 |
+| 工具描述 | tools/*/prompt.ts | ~3,000 | 工具行为规范 |
+| **小计：LLM 指令** | | **~4,200** | |
+
+**框架代码约占 82%，LLM 指令约占 18%**——与外部分析的 80/20 判断高度吻合。
+
+这意味着：如果你想构建类似 Claude Code 的 Agent 系统，大部分时间不是在写 Prompt，而是在构建消息管理、上下文压缩、权限控制、错误恢复、缓存优化这些"看不见的基础设施"。
+
+---
+
+:::info 番外小结
+本篇番外覆盖了外部分析文章中讨论最热烈的话题：
+- **双层特性标志**：88 个编译时标志（DCE 保安全）+ GrowthBook 运行时配置（渐进式发布）
+- **CLAUDE.md 层级**：四层优先级 + 目录遍历 + @include 组合 + paths 作用域
+- **流式工具执行**：中流启动 + 并发安全分类 + 兄弟中止控制器
+- **协调者模式**：纯调度、不执行的多 Worker 编排
+- **隐藏功能巡礼**：KAIROS 自主模式、Buddy 电子宠物、ULTRAPLAN 等
+- **80/20 洞察**：生产级 Agent 的代码量分布验证
+
+这些内容不仅满足了读者对"隐藏功能"的好奇心，更重要的是揭示了一个核心工程真理：**构建生产级 LLM 智能体，模型调用只是冰山一角，水面下 80% 的框架代码才是真正的护城河**。
+:::
