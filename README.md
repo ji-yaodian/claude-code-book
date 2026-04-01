@@ -6,7 +6,7 @@
 
 ## 📖 在线阅读
 
-**[https://YOUR_USERNAME.github.io/claude-code-book](https://YOUR_USERNAME.github.io/claude-code-book)**
+**[https://ji-yaodian.github.io/claude-code-book](https://ji-yaodian.github.io/claude-code-book)**
 
 > 部署后替换上方链接中的 `YOUR_USERNAME` 为你的 GitHub 用户名。
 
