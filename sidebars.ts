@@ -2,7 +2,7 @@ import type { SidebarsConfig } from '@docusaurus/plugin-content-docs';
 
 const sidebars: SidebarsConfig = {
   bookSidebar: [
-    { type: 'doc', id: 'outline', label: '📖 书籍目录与阅读指南' },
+    { type: 'doc', id: 'outline', label: '📖 目录与阅读指南' },
     {
       type: 'category',
       label: '基础篇',
