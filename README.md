@@ -8,8 +8,6 @@
 
 **[https://ji-yaodian.github.io/claude-code-book](https://ji-yaodian.github.io/claude-code-book)**
 
-> 部署后替换上方链接中的 `YOUR_USERNAME` 为你的 GitHub 用户名。
-
 ## 📚 内容目录
 
 | 章节 | 主题 |
