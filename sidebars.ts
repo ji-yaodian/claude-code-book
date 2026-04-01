@@ -61,6 +61,14 @@ const sidebars: SidebarsConfig = {
         { type: 'doc', id: 'message-construction', label: '第 16 章 · 消息数组的构造与生命周期' },
       ],
     },
+    {
+      type: 'category',
+      label: '番外篇',
+      items: [
+        { type: 'doc', id: 'A1-memory-system', label: '番外一 · 记忆系统' },
+        { type: 'doc', id: 'A2-design-philosophy', label: '番外二 · 幕后设计哲学' },
+      ],
+    },
   ],
 };
 
