@@ -10,10 +10,10 @@ import TabItem from '@theme/TabItem';
 # 番外一 · 记忆系统（下）：持久记忆与 CLAUDE.md
 
 :::tip 前置阅读
-本文是记忆系统的下篇。Session Memory 和上下文压缩的完整机制详见 **[番外一（上）：会话记忆与上下文压缩](/A1-memory-system)**。
+本文是记忆系统的下篇。Session Memory 详见 **[上篇](/A1-memory-system)**，上下文压缩详见 **[中篇](/A1a-compaction)**。
 :::
 
-上篇讲的是**单次会话内**的记忆机制——Session Memory 在后台提取笔记，Compaction 在上下文耗尽时用笔记或 API 总结来恢复空间。但这些都随会话结束而消失。
+前两篇讲的是**单次会话内**的记忆机制——Session Memory 在后台提取笔记，Compaction 在上下文耗尽时用笔记或 API 总结来恢复空间。但这些都随会话结束而消失。
 
 本篇讲的是**跨会话**的记忆机制：如何让下一次新会话记住上一次学到的东西？以及静态指令（CLAUDE.md）是如何始终生效的？
 

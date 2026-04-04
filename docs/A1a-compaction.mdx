@@ -1,0 +1,428 @@
+---
+sidebar_position: 17.5
+title: 番外一 · 记忆系统（中）：上下文压缩
+description: 深入剖析 Claude Code 的 Compaction 机制——两条压缩路径的完整流程、消息数组的重建细节、传统压缩的 Prompt 设计、微压缩预处理，理解一个 LLM 智能体如何在上下文耗尽时恢复工作能力
+---
+
+import BrowserOnly from '@docusaurus/BrowserOnly';
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+# 番外一 · 记忆系统（中）：上下文压缩
+
+:::tip 前置阅读
+本文是记忆系统的中篇。Session Memory 的后台笔记提取机制详见 **[番外一（上）：Session Memory](/A1-memory-system)**。
+:::
+
+上篇讲了 Session Memory 如何在对话进行中持续提取笔记到一个 Markdown 文件。本篇讲的是：**当上下文窗口快满时，系统如何利用这份笔记（或 API 调用）来压缩旧消息、恢复可用空间。**
+
+---
+
+## A1.3 上下文压缩：当空间不够时发生了什么
+
+### 何时触发
+
+> 📍 核心逻辑：`src/services/compact/autoCompact.ts:62-91`
+
+压缩阈值的计算公式：
+
+```
+有效上下文窗口 = 模型上下文窗口 - min(模型最大输出 token, 20,000)
+自动压缩阈值 = 有效上下文窗口 - 13,000
+```
+
+以 200K token 窗口为例：
+
+```
+有效窗口 = 200,000 - 20,000 = 180,000
+压缩阈值 = 180,000 - 13,000 = 167,000
+→ 当 token 使用量 ≥ 167,000 时自动触发
+```
+
+这里预留了两层缓冲：**20K** 给压缩总结的输出空间，**13K** 作为触发到实际满之间的余量——确保压缩有足够的空间完成。
+
+### token 使用量的变化
+
+下面的图表展示了一次典型会话中 token 使用量的完整生命周期——从对话开始到触发压缩，再到压缩后的重新累积：
+
+<BrowserOnly>
+  {() => {
+    const TokenTimeline = require('@site/src/components/memory/TokenTimeline').default;
+    return <TokenTimeline />;
+  }}
+</BrowserOnly>
+
+几个关键观察：
+- **紫色标记**是 Session Memory 后台提取的时间点——它在对话进行中持续工作
+- 到达红色阈值线时触发压缩，token 数**断崖式下降**
+- 压缩后对话从低 token 起点重新累积——可以继续很长的对话
+
+### 两条压缩路径
+
+触发压缩后，系统会尝试两条路径，**优先走更便宜的那条**：
+
+```mermaid
+flowchart TD
+    A["Token 使用量 ≥ 压缩阈值"] --> B{"Session Memory\n笔记是否可用?"}
+
+    B -->|"笔记存在且非空"| C["路径 A: SM 压缩\n零 API 调用"]
+    B -->|"笔记为空/不可用"| D["路径 B: 传统压缩\n需要额外 API 调用"]
+
+    C --> E{"压缩后 token 数\n低于阈值?"}
+    E -->|是| F["✅ 压缩成功"]
+    E -->|否| D
+
+    D --> G["微压缩预处理"]
+    G --> H["调用 Claude API\n生成 9 段式总结"]
+    H --> I["格式化总结"]
+    I --> F
+
+    F --> J["重建消息数组\n= 边界标记 + 摘要\n+ 保留消息 + 重注入"]
+
+    style C fill:#8b5cf6,color:#fff
+    style D fill:#ef4444,color:#fff
+    style F fill:#22c55e,color:#fff
+```
+
+**为什么有两条路径？** 传统压缩需要调用一次 Claude API 来生成总结——这意味着额外的延迟和费用。Session Memory 压缩的核心洞察是：既然后台子代理已经在持续提取笔记了，**笔记本身就是现成的总结**，直接用它替代被删除的旧消息就行了，不需要额外的 API 调用。
+
+### 两条路径的完整流程
+
+点击每个步骤查看详细说明：
+
+<BrowserOnly>
+  {() => {
+    const CompactionPipeline = require('@site/src/components/memory/CompactionPipeline').default;
+    return <CompactionPipeline />;
+  }}
+</BrowserOnly>
+
+### 压缩前后的消息数组对比
+
+下面的交互组件展示了压缩前后消息数组的具体变化——这是理解"上下文如何恢复"的最直观方式。点击"压缩后"按钮查看转换结果：
+
+<BrowserOnly>
+  {() => {
+    const CompactionBeforeAfter = require('@site/src/components/memory/CompactionBeforeAfter').default;
+    return <CompactionBeforeAfter />;
+  }}
+</BrowserOnly>
+
+### 摘要消息的具体内容：两条路径不同
+
+两条路径最终都会生成一条 `user` 类型的摘要消息注入到新消息数组中，但**摘要的内容来源和格式是不同的**。
+
+<Tabs>
+  <TabItem value="sm" label="路径 A：Session Memory 压缩的摘要" default>
+
+SM 压缩的摘要内容**直接就是笔记文件的内容**——上篇展示的那个 `summary.md`。系统读取文件，截断超大段落（每段最多 ~2000 token），然后包装成摘要消息：
+
+```text title="SM 压缩摘要（简化）"
+This session is being continued from a previous conversation that ran
+out of context. The summary below covers the earlier portion of the
+conversation.
+
+# Session Title
+重构 Auth 模块并修复 Token 刷新竞态问题
+
+# Current State
+正在修复 src/auth/refresh.ts 中 refresh token 的并发竞态...
+
+# Task specification
+用户要求重构认证模块：从 session-based 迁移到 JWT...
+
+（... 笔记文件的其余段落 ...）
+
+If you need specific details from before compaction, read the full
+transcript at: ~/.claude/projects/.../d7702287.../transcript.jsonl
+
+Recent messages are preserved verbatim.
+
+Continue the conversation from where it left off without asking the
+user any further questions. Resume directly — do not acknowledge the
+summary, do not recap what was happening...
+```
+
+**注意：这里不需要 API 调用。** 笔记文件是后台子代理在对话过程中持续维护的，压缩时只需要读取文件。
+
+  </TabItem>
+  <TabItem value="traditional" label="路径 B：传统压缩的摘要">
+
+传统压缩的摘要由 Claude API **实时生成**，使用的是**另一套 9 段结构**（面向"一次性全量回顾"设计，与笔记文件的段落不同）：
+
+```text title="传统压缩摘要（简化）"
+This session is being continued from a previous conversation that ran
+out of context. The summary below covers the earlier portion of the
+conversation.
+
+Summary:
+1. Primary Request and Intent:
+   用户要求重构 auth 模块，采用 JWT + refresh token 方案...
+
+2. Key Technical Concepts:
+   - Express middleware chain
+   - JWT token rotation...
+
+3. Files and Code Sections:
+   - src/auth/index.ts — 重构了 token 验证逻辑
+     [完整代码片段: export function verifyToken(req, res, next) ...]
+
+4. Errors and fixes:
+   - import path 错误 → 改为相对路径...
+
+5. Problem Solving:
+   解决了 middleware export 缺失导致的测试失败...
+
+6. All user messages:
+   - "帮我重构 auth 模块"
+   - "测试跑一下"
+   - "还需要处理 token 刷新逻辑"
+
+7. Pending Tasks:
+   - 修复 refresh token 并发竞态
+
+8. Current Work:
+   正在处理 src/auth/refresh.ts 中的并发刷新问题...
+
+9. Optional Next Step:
+   添加 mutex 锁到 handleTokenRefresh()...
+
+If you need specific details from before compaction, read the full
+transcript at: ~/.claude/projects/.../transcript.jsonl
+
+Continue the conversation from where it left off...
+```
+
+  </TabItem>
+</Tabs>
+
+**两套 9 段结构的区别：**
+
+| SM 笔记文件的段落 | 传统压缩总结的段落 | 设计差异 |
+|---|---|---|
+| Session Title | — | 笔记有标题，总结没有 |
+| **Current State** | **Current Work** | 类似，但笔记的 Current State 每次提取都必须更新 |
+| Task specification | Primary Request and Intent | 笔记侧重"设计决策"，总结侧重"用户意图" |
+| Files and Functions | Files and Code Sections | 总结要求包含**完整代码片段** |
+| **Workflow** | — | 总结没有这个段落（不需要记住命令） |
+| Errors & Corrections | Errors and fixes | 笔记额外记录"用户纠正了什么" |
+| Codebase and System Documentation | Key Technical Concepts | 角度不同 |
+| **Learnings** | Problem Solving | 笔记记"什么有效/无效"，总结记"解决过程" |
+| Key results | — | 总结没有（不需要保留精确输出） |
+| Worklog | Pending Tasks | 笔记是"做了什么"，总结是"还要做什么" |
+| — | **All user messages** | 笔记没有（不需要原文），总结要求列出所有用户消息 |
+| — | **Optional Next Step** | 笔记没有（靠 Current State），总结需要引用原文建议下一步 |
+
+设计思路的本质区别：**笔记文件会被反复更新**，所以需要 Workflow、Learnings、Worklog 这种"需要持续积累"的段落。**传统总结只生成一次**，所以需要 All user messages、Optional Next Step 这种"一次性全量回顾"的段落。
+
+两种摘要的末尾都有同样的指令：
+
+> Continue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening...
+
+这告诉模型：**不要承认压缩发生了，直接像什么都没发生一样继续工作。** 确保用户体验的连续性。
+
+### Transcript 文件：压缩的安全网
+
+两种摘要中都包含一个 transcript 文件路径（如 `~/.claude/projects/.../d7702287.../transcript.jsonl`）。这是会话的**完整原始对话记录**——每条消息、每次工具调用、每个返回结果都以 JSON Lines 格式逐行记录。
+
+它的作用是**压缩的安全网**：如果摘要丢失了某些细节（比如一段具体的代码片段），模型可以通过 `Read` 工具读取 transcript 文件来找回原始内容。这就像"删除了邮件但还能从回收站找回来"。
+
+### 边界标记（boundaryMarker）的元数据
+
+压缩后消息数组的第一条是边界标记——一条特殊的系统消息，不是给模型"看"的，而是给系统内部逻辑用的。它携带以下元数据：
+
+```typescript title="createCompactBoundaryMessage() 创建的元数据"
+{
+  type: 'auto' | 'manual',              // 压缩类型
+  preCompactTokenCount: number,          // 压缩前的 token 数
+  lastMessageUuid: string,               // 压缩前最后一条消息的 UUID
+  compactMetadata: {
+    preservedSegment: { ... },           // 保留段的链接信息（用于去重）
+    preCompactDiscoveredTools: string[],  // 压缩前发现的工具名（供 ToolSearch 恢复）
+  }
+}
+```
+
+其中 `preCompactDiscoveredTools` 特别重要——Claude Code 的工具发现是渐进式的（ToolSearch 按需加载），压缩后这些发现记录会丢失。边界标记保存了压缩前已发现的工具名，让系统在压缩后能自动重新加载这些工具。
+
+### 压缩后的文件附件预算
+
+压缩后除了重注入 CLAUDE.md 和工具定义，系统还会尝试恢复最近读取过的文件——但有严格的预算：
+
+```typescript title="src/services/compact/compact.ts:122-130" showLineNumbers
+export const POST_COMPACT_MAX_FILES_TO_RESTORE = 5      // 最多恢复 5 个文件
+export const POST_COMPACT_TOKEN_BUDGET = 50_000          // 文件总预算 50K tokens
+export const POST_COMPACT_MAX_TOKENS_PER_FILE = 5_000    // 每文件最多 5K tokens
+export const POST_COMPACT_MAX_TOKENS_PER_SKILL = 5_000   // 每技能最多 5K tokens
+export const POST_COMPACT_SKILLS_TOKEN_BUDGET = 25_000   // 技能总预算 25K tokens
+```
+
+优先恢复最近读取的文件——如果压缩前你刚读了 `src/auth/refresh.ts`，它大概率会被重新附加到上下文中，让模型不需要重新 `Read` 就能继续编辑。
+
+### tool_use/tool_result 对的保护
+
+Claude API 有一个严格的不变量：每个 `tool_result` 消息必须有对应的 `tool_use` 消息。如果压缩时的裁切位置不当——保留了 `tool_result` 但删除了对应的 `tool_use`——API 会报错。
+
+`adjustIndexToPreserveAPIInvariants()` 负责处理这个问题：
+
+```typescript title="src/services/compact/sessionMemoryCompact.ts:232-286（简化）" showLineNumbers
+export function adjustIndexToPreserveAPIInvariants(
+  messages: Message[], startIndex: number
+): number {
+  let adjustedIndex = startIndex
+
+  // Step 1: 收集保留范围内所有 tool_result 的 ID
+  const allToolResultIds: string[] = []
+  for (let i = startIndex; i < messages.length; i++) {
+    allToolResultIds.push(...getToolResultIds(messages[i]!))
+  }
+
+  // 找到保留范围之外、但被 tool_result 引用的 tool_use
+  const neededToolUseIds = new Set(
+    allToolResultIds.filter(id => !toolUseIdsInKeptRange.has(id))
+  )
+
+  // 向前扩展保留范围以包含这些 tool_use
+  for (let i = adjustedIndex - 1; i >= 0 && neededToolUseIds.size > 0; i--) {
+    if (hasToolUseWithIds(messages[i]!, neededToolUseIds)) {
+      adjustedIndex = i  // 扩展边界
+    }
+  }
+
+  // Step 2: 处理流式分割的 thinking 块
+  // 流式传输可能产生多个共享 message.id 的消息
+  // 确保 thinking 块与对应的 tool_use 不被分割
+  // ...
+
+  return adjustedIndex
+}
+```
+
+举一个具体的 bug 场景——这个函数就是为了修复它：
+
+```
+消息数组：
+  [N]   assistant, id: X, content: [thinking]
+  [N+1] assistant, id: X, content: [tool_use: ORPHAN_ID]
+  [N+2] assistant, id: X, content: [tool_use: VALID_ID]
+  [N+3] user, content: [tool_result: ORPHAN_ID, tool_result: VALID_ID]
+
+如果压缩的 startIndex = N+2：
+  保留：[N+2] [N+3]
+  → normalizeMessagesForAPI 合并 id: X 的消息
+  → 结果：assistant 只有 [tool_use: VALID_ID]，但 user 有 [tool_result: ORPHAN_ID]
+  → API 报错：orphan tool_result
+
+修复：检测到 N+3 的 ORPHAN_ID 引用了 N+1 的 tool_use
+     → 将 startIndex 调整为 N（同时包含 N 的 thinking 块）
+```
+
+### 连续失败的熔断器
+
+如果压缩连续失败 3 次，系统会停止重试：
+
+```typescript title="src/services/compact/autoCompact.ts:67-70" showLineNumbers
+const MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES = 3
+// BQ 2026-03-10: 1,279 个会话在单次会话中有 50+ 次连续失败
+// (最多 3,272 次)，浪费约 250K API 调用/天
+```
+
+这个注释来自线上数据分析——在引入熔断器之前，某些不可恢复的情况（如对话结构已损坏）会导致系统不断重试压缩，全球每天浪费约 25 万次 API 调用。
+
+---
+
+## A1.4 传统压缩的总结 Prompt
+
+当 Session Memory 不可用时，传统压缩需要调用 Claude API 来生成总结。这个总结的 prompt 设计有几个值得关注的细节。
+
+### 严格禁止工具调用
+
+总结 prompt 的开头是一段非常强硬的禁令：
+
+```text title="src/services/compact/prompt.ts:19-26"
+CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.
+
+- Do NOT use Read, Bash, Grep, Glob, Edit, Write, or ANY other tool.
+- You already have all the context you need in the conversation above.
+- Tool calls will be REJECTED and will waste your only turn — you will fail the task.
+- Your entire response must be plain text.
+```
+
+为什么要这么强硬？注释中给出了原因：
+
+> 缓存共享的分叉路径继承了主对话的完整工具集（API cache-key 匹配需要），而 Sonnet 4.6+ 的自适应思考模型有时会尝试调用工具。`maxTurns: 1` 意味着如果工具调用被拒绝，就没有文本输出了——总结直接失败。在 4.6 上这个问题的发生率是 2.79%（vs 4.5 的 0.01%）。
+
+### analysis + summary 的双阶段结构
+
+Prompt 要求模型先在 `<analysis>` 标签中做详细的思维分析，然后在 `<summary>` 标签中输出正式总结。
+
+`formatCompactSummary()` 在后处理时会**直接删除 `<analysis>` 块**——它只是一个改善总结质量的"思维草稿"，没有信息价值。
+
+```typescript title="src/services/compact/prompt.ts:311-334（简化）" showLineNumbers
+export function formatCompactSummary(summary: string): string {
+  let result = summary
+  // 删除 analysis —— 它只是草稿
+  result = result.replace(/<analysis>[\s\S]*?<\/analysis>/, '')
+  // 提取 summary 内容
+  const match = result.match(/<summary>([\s\S]*?)<\/summary>/)
+  if (match) {
+    result = result.replace(/<summary>[\s\S]*?<\/summary>/, `Summary:\n${match[1].trim()}`)
+  }
+  return result.trim()
+}
+```
+
+这是一个经典的"chain-of-thought 后丢弃推理过程"模式——让模型先想清楚再输出，但只保留最终结果。
+
+### 三种总结变体
+
+根据压缩类型，使用不同的 prompt 变体：
+
+| 变体 | 场景 | 关键区别 |
+|------|------|---------|
+| `BASE_COMPACT_PROMPT` | 压缩所有消息 | 分析"整个对话" |
+| `PARTIAL_COMPACT_PROMPT` | 只压缩最近部分 | "早期消息保留在上文中，只总结最近的" |
+| `PARTIAL_COMPACT_UP_TO_PROMPT` | 压缩前半部分 | 第 8 节变为"已完成的工作"，第 9 节变为"继续工作所需的上下文" |
+
+---
+
+## A1.5 微压缩：发送给总结模型之前的预处理
+
+在传统压缩路径中，消息先经过"微压缩"（microcompact）——这是一个不需要 API 调用的本地优化步骤，目的是减少发送给总结模型的 token 数量。
+
+> 📍 源码：`src/services/compact/microCompact.ts`
+
+### 可处理的工具类型
+
+微压缩只处理特定工具的输出结果：
+
+```typescript title="src/services/compact/microCompact.ts:39-49" showLineNumbers
+const COMPACTABLE_TOOLS = new Set<string>([
+  FILE_READ_TOOL_NAME,     // Read
+  ...SHELL_TOOL_NAMES,     // Bash
+  GREP_TOOL_NAME,          // Grep
+  GLOB_TOOL_NAME,          // Glob
+  WEB_SEARCH_TOOL_NAME,    // WebSearch
+  WEB_FETCH_TOOL_NAME,     // WebFetch
+  FILE_EDIT_TOOL_NAME,     // Edit
+  FILE_WRITE_TOOL_NAME,    // Write
+])
+```
+
+这些工具的输出通常很大（一次 `Read` 可能返回几千行代码），但其内容在总结阶段可以被安全清理——因为总结模型只需要知道"读了什么文件"和"做了什么编辑"，不需要完整的文件内容。
+
+### 两种微压缩模式
+
+**Cached Microcompact：** 不修改本地消息内容，而是通过 Prompt Cache API 的 `cache_edits` 功能在 API 层面标记删除。好处是不破坏本地缓存。
+
+**Time-Based Microcompact：** 当助手消息之间的时间间隔超过一定阈值时，直接将旧工具结果替换为 `[Old tool result content cleared]`。适用于 prompt cache 已过期（用户离开了一会儿再回来）的场景。
+
+### 图片的特殊处理
+
+如果对话中包含图片（如用户发送截图），微压缩会在发送给总结模型之前将图片替换为 `[image]` 文本标记——因为图片会导致总结请求本身的 token 数过大。
+
+---
+
+:::tip 继续阅读
+持久记忆（Auto Memory）、CLAUDE.md 指令层和设计洞察详见 **[番外一（下）：持久记忆与 CLAUDE.md](/A1b-memory-persistent)**。
+:::
