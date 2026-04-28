@@ -201,15 +201,199 @@ export async function loadMemoryPrompt(): Promise<string | null> {
 
 ### Auto-Dream：记忆整理
 
-记忆会随时间积累，需要定期整理。`autoDream.ts` 实现了一个后台整理进程，采用**按成本排序的三重门控**：
+记忆会随时间积累，需要定期整理。`autoDream.ts` 实现了一个后台整理进程——在每轮对话结束时触发，满足条件则启动一个专用的分叉子代理（forked agent）来整理记忆文件。
+
+#### 触发时机：每轮结束时的 stopHooks
+
+Auto-Dream 挂载在 `stopHooks` 上，在主对话的**每轮模型输出结束后**触发：
+
+```typescript title="src/query/stopHooks.ts（简化）" showLineNumbers
+// fire-and-forget —— 不 await，不阻塞主对话
+executeAutoDream(context, appendSystemMessage)
+```
+
+但"触发"不等于"执行"——`executeAutoDream` 只是调用 `runner?.(context)`，而 `runner` 在每次触发时都会检查三重门控。
+
+#### 初始化：闭包作用域的状态
+
+`autoDream.ts` 的状态不在模块顶层，而在 `initAutoDream()` 函数的**闭包作用域**里：
+
+```typescript title="src/services/autoDream/autoDream.ts:122-125" showLineNumbers
+export function initAutoDream(): void {
+  let lastSessionScanAt = 0  // 上次扫描会话目录的时间戳
+
+  runner = async function runAutoDream(context, appendSystemMessage) {
+    // ...
+  }
+}
+```
+
+> 📍 源码入口：`src/services/autoDream/autoDream.ts`
+
+这个设计让测试可以在 `beforeEach` 中调用 `initAutoDream()` 来重置状态，不会出现模块级状态污染。启动时由 `startBackgroundHousekeeping()` → `initAutoDream()` 调用一次。
+
+#### 三重门控（按成本排序）
+
+三个门控按**成本从低到高**依次检查——绝大多数情况下，门控 1 就能拦住，不需要扫描文件目录：
 
 ```
 门控 1（最便宜）：stat 一个文件 → 距上次整理 ≥ 24 小时？
+扫描节流：       距上次扫描 ≥ 10 分钟？（防止时间门通过后每轮都扫）
 门控 2（中等）：  扫描会话目录 → 新增会话 ≥ 5 个？
 门控 3（最贵）：  获取文件锁   → 没有其他进程在整理？
 ```
 
-三个条件必须全部通过才会开始整理。绝大多数情况下，门控 1 就能拦住——只花费一次 `stat` 系统调用的成本。
+**门控 1 — 时间门：**
+
+```typescript title="src/services/autoDream/autoDream.ts:131-141" showLineNumbers
+const lastAt = await readLastConsolidatedAt()  // 读 .consolidate-lock 的 mtime
+const hoursSince = (Date.now() - lastAt) / 3_600_000
+if (hoursSince < cfg.minHours) return          // 默认 24 小时
+```
+
+时间信息直接编码在锁文件的 **mtime** 里——不需要单独的状态文件，一次 `stat` 系统调用就能得到上次整理的时间。
+
+**扫描节流（时间门通过后）：**
+
+时间门通过后，如果会话门不满足，锁文件的 mtime 不会前进，下次触发时时间门还是会通过。这会导致每轮都扫描会话目录——因此加了 10 分钟的节流：
+
+```typescript title="src/services/autoDream/autoDream.ts:143-151" showLineNumbers
+const sinceScanMs = Date.now() - lastSessionScanAt
+if (sinceScanMs < SESSION_SCAN_INTERVAL_MS) return // SESSION_SCAN_INTERVAL_MS = 10min
+lastSessionScanAt = Date.now()
+```
+
+**门控 2 — 会话门：**
+
+```typescript title="src/services/autoDream/autoDream.ts:153-170" showLineNumbers
+let sessionIds = await listSessionsTouchedSince(lastAt)
+// 排除当前会话（它的 mtime 总是很新）
+sessionIds = sessionIds.filter(id => id !== getSessionId())
+if (sessionIds.length < cfg.minSessions) return    // 默认 5 个会话
+```
+
+`listSessionsTouchedSince()` 扫描项目的会话目录，找出 **mtime 在上次整理之后**被修改的会话文件（`.jsonl` 格式）。注意用的是 `mtime`（最后修改时间）而非 `birthtime`——因为 Linux ext4 文件系统的 `birthtime` 总是 0。
+
+#### 锁机制：mtime 即状态
+
+锁文件 `.consolidate-lock` 存在内存目录下，它的 **mtime 就是 lastConsolidatedAt**，文件体是持有者的 PID：
+
+```
+~/.claude/projects/{project-slug}/memory/.consolidate-lock
+```
+
+**获取锁的逻辑：**
+
+```typescript title="src/services/autoDream/consolidationLock.ts:46-83" showLineNumbers
+export async function tryAcquireConsolidationLock(): Promise<number | null> {
+  // 1. 读取现有锁文件（如果存在）
+  const [s, raw] = await Promise.all([stat(path), readFile(path, 'utf8')])
+  const holderPid = parseInt(raw.trim(), 10)
+
+  // 2. 判断锁是否有效（持有者存活且 < 60 分钟）
+  if (Date.now() - mtimeMs < HOLDER_STALE_MS) {       // 60 分钟有效期
+    if (isProcessRunning(holderPid)) return null        // 锁被活着的进程持有，放弃
+    // 死进程 → 强行夺取
+  }
+
+  // 3. 写入 PID 并做二次验证（防止两个进程同时夺取）
+  await writeFile(path, String(process.pid))
+  const verify = await readFile(path, 'utf8')
+  if (parseInt(verify.trim(), 10) !== process.pid) return null  // 输了竞争
+
+  return mtimeMs ?? 0  // 返回 pre-acquire 时间（用于失败时回滚）
+}
+```
+
+**失败回滚：**
+
+整理失败时，需要把锁文件的 mtime 倒回到整理前，让时间门下次还能通过：
+
+```typescript title="src/services/autoDream/consolidationLock.ts:91-108" showLineNumbers
+export async function rollbackConsolidationLock(priorMtime: number): Promise<void> {
+  if (priorMtime === 0) {
+    await unlink(path)    // 原本没有锁文件 → 直接删除
+    return
+  }
+  await writeFile(path, '')         // 清空 PID（防止被认为仍在持有）
+  const t = priorMtime / 1000
+  await utimes(path, t, t)          // 恢复 mtime
+}
+```
+
+扫描节流（10 分钟）承担了失败后的退避职责——即使时间门立刻通过，也不会立刻重试。
+
+#### 执行：分叉子代理
+
+三重门控通过后，创建一个 forked agent 执行整理：
+
+```typescript title="src/services/autoDream/autoDream.ts:224-233" showLineNumbers
+const result = await runForkedAgent({
+  promptMessages: [createUserMessage({ content: prompt })],
+  cacheSafeParams: createCacheSafeParams(context),    // 复用主对话的 prompt cache
+  canUseTool: createAutoMemCanUseTool(memoryRoot),     // 工具权限限制
+  querySource: 'auto_dream',
+  forkLabel: 'auto_dream',
+  skipTranscript: true,                               // 不记入对话 timeline
+  overrides: { abortController },
+  onMessage: makeDreamProgressWatcher(taskId, setAppState),
+})
+```
+
+**工具权限：** `createAutoMemCanUseTool(memoryRoot)` 允许对内存目录内文件的读写，同时 Bash 工具被限制为只读命令（`ls`, `find`, `grep`, `cat`, `stat`, `wc`, `head`, `tail` 等），禁止任何写文件或改变状态的操作。
+
+#### 四阶段整理提示词
+
+> 📍 源码：`src/services/autoDream/consolidationPrompt.ts`
+
+整理提示词将任务分成四个阶段，引导子代理系统地完成记忆整理：
+
+| 阶段 | 任务 | 工具 |
+|------|------|------|
+| **Phase 1 — Orient** | 浏览内存目录，读 MEMORY.md 索引，快速浏览现有记忆 | `ls`, `cat` |
+| **Phase 2 — Gather recent signal** | 查找新信息：优先读日志文件，找漂移的记忆，按需 grep 会话记录 | `grep`, `cat` |
+| **Phase 3 — Consolidate** | 合并新信号到现有记忆，转换相对日期，删除矛盾事实 | `FileEdit`, `FileWrite` |
+| **Phase 4 — Prune and index** | 更新 MEMORY.md（保持 ≤ 200 行、≤ 25KB），删除过时指针，解决矛盾 | `FileEdit` |
+
+Phase 2 明确告诫：**不要穷举读取会话记录**——只在有目的时才 `grep` 会话目录，因为 JSONL 文件可能非常大。
+
+#### 进度追踪：DreamTask
+
+整理过程通过 `DreamTask` 系统在 UI 中可见——出现在底部状态栏的后台任务胶囊和 `Shift+Down` 后台任务对话框中：
+
+```typescript title="src/tasks/DreamTask/DreamTask.ts:25-41" showLineNumbers
+export type DreamTaskState = TaskStateBase & {
+  type: 'dream'
+  phase: DreamPhase          // 'starting' | 'updating'
+  sessionsReviewing: number  // 正在检视的会话数
+  filesTouched: string[]     // 已修改的文件路径（来自 Edit/Write tool_use）
+  turns: DreamTurn[]         // 最近 30 轮助手回应
+  priorMtime: number         // 用于 kill 时回滚锁
+}
+```
+
+`makeDreamProgressWatcher` 监听 forked agent 的消息流，提取文本块和工具调用：
+
+- **文本块** → 追加到 `turns`（用户在 UI 中能看到整理进度）
+- **Edit/Write 工具调用** → 提取 `file_path`，加入 `filesTouched`
+- 一旦有文件被修改：阶段从 `'starting'` 翻转到 `'updating'`
+
+**用户中止：** `DreamTask.kill()` 调用 `abortController.abort()`，同时执行 `rollbackConsolidationLock(priorMtime)` 回滚锁——和 fork 失败时的处理路径完全相同。
+
+#### 完成处理
+
+```typescript title="src/services/autoDream/autoDream.ts:235-248" showLineNumbers
+completeDreamTask(taskId, setAppState)
+// 如果有文件被修改，在主对话的 timeline 里插入系统消息
+if (appendSystemMessage && dreamState.filesTouched.length > 0) {
+  appendSystemMessage({
+    ...createMemorySavedMessage(dreamState.filesTouched),
+    verb: 'Improved',
+  })
+}
+```
+
+整理成功后，如果有文件被修改，会在主对话中插入一条 **"Improved N files"** 的系统消息——这是用户唯一能看到 auto-dream 工作的地方（DreamTask 本身标记了 `skipTranscript: true`，不出现在对话历史里）。整理失败时，调用 `rollbackConsolidationLock(priorMtime)` 回滚，让下次会话的时间门再次通过。
 
 ---
 
@@ -345,7 +529,11 @@ Claude Code 的记忆系统用四个协作的子系统解决了 LLM 智能体的
 | `src/memdir/memdir.ts` | 持久记忆加载和 Prompt 构建 |
 | `src/memdir/memoryTypes.ts` | 四类记忆的定义和行为指导 |
 | `src/memdir/memoryAge.ts` | 新鲜度计算和过时警告 |
-| `src/memdir/autoDream.ts` | 自动记忆整理（三重门控） |
+| `src/services/autoDream/autoDream.ts` | 自动记忆整理主逻辑（三重门控、forked agent） |
+| `src/services/autoDream/consolidationLock.ts` | 锁机制（mtime = 上次整理时间、PID 竞争、回滚） |
+| `src/services/autoDream/consolidationPrompt.ts` | 四阶段整理提示词构建 |
+| `src/services/autoDream/config.ts` | Auto-Dream 启用状态（用户设置 + GB flag） |
+| `src/tasks/DreamTask/DreamTask.ts` | 后台任务状态（UI 可见、进度追踪、kill） |
 | `src/utils/claudemd.ts` | CLAUDE.md 发现和加载 |
 | `src/context.ts` | System/User 上下文注入 |
 | `src/constants/prompts.ts` | 系统提示词组装（静态段 + 动态段） |
